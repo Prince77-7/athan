@@ -1,0 +1,2912 @@
+import {
+  Coordinates,
+  CalculationMethod,
+  PrayerTimes,
+  SunnahTimes,
+  Prayer,
+  Qibla,
+  CalculationParameters,
+  Madhab,
+  HighLatitudeRule
+} from "adhan";
+import moment from "moment";
+import "moment-timezone";
+import "moment-hijri"; // Import moment-hijri extension
+import "./styles.css"; // Import CSS directly
+import { City, loadCities, searchCities, getUserLocation, findNearestCity } from "./cities";
+
+// App initialization
+console.log("Prayer times app initializing...");
+
+// Test moment-hijri initialization
+try {
+  const testM = moment();
+  const testHijri = testM.format('iYYYY/iM/iD');
+  console.log("Testing moment-hijri:", testHijri);
+  
+  // Check if it's returning actual values or just the format string
+  if (testHijri === 'iYYYY/iM/iD') {
+    console.error("moment-hijri not initializing correctly, formats are not processed");
+    // Try to manually initialize moment-hijri (in case the import didn't work)
+    try {
+      // @ts-ignore
+      if (typeof window !== 'undefined' && window.momentHijri) {
+        // @ts-ignore
+        window.momentHijri(moment);
+        console.log("Manually initialized moment-hijri");
+      }
+    } catch (e) {
+      console.error("Failed to manually initialize:", e);
+    }
+  } else {
+    console.log("moment-hijri initialized successfully");
+  }
+} catch (e) {
+  console.error("Error testing moment-hijri:", e);
+}
+
+// Simplified debug function for Hijri date
+function debugHijriDate(date = new Date()) {
+  console.log("=========== HIJRI DATE DEBUG INFO ===========");
+  try {
+    // Test with browser-loaded moment if available
+    if (typeof window !== 'undefined' && window.moment) {
+      console.log("BROWSER-LOADED MOMENT-HIJRI:");
+      const browserMoment = window.moment(date);
+      const hijriDate = browserMoment.format('iYYYY/iM/iD');
+      console.log(`Format result: ${hijriDate}`);
+      console.log(`Is working: ${hijriDate !== 'iYYYY/iM/iD'}`);
+      
+      // Check for methods on the browser-loaded moment
+      const bmAsAny = browserMoment as any;
+      if (typeof bmAsAny.iYear === 'function') {
+        console.log(`Methods: Year=${bmAsAny.iYear()}, Month=${bmAsAny.iMonth()+1}, Day=${bmAsAny.iDate()}`);
+        
+        // Try our production function
+        console.log("\nPRODUCTION FUNCTION RESULT:");
+        try {
+          const result = getHijriDate();
+          console.log(result);
+        } catch (e) {
+          console.error("Error in production function:", e);
+        }
+      } else {
+        console.log("Methods not available in browser-loaded moment");
+      }
+    } else {
+      console.log("Browser-loaded moment not available");
+    }
+    
+    // Test with module-loaded moment
+    const m = moment(date);
+    
+    console.log("\nMODULE-LOADED MOMENT-HIJRI:");
+    console.log(`Original date: ${m.format('YYYY/MM/DD')}`);
+    console.log(`Format attempt: ${m.format('iYYYY/iM/iD')}`);
+    
+    // Check if we can access the Hijri methods
+    const mAsAny = m as any;
+    if (typeof mAsAny.iYear === 'function') {
+      console.log(`Methods: Year=${mAsAny.iYear()}, Month=${mAsAny.iMonth()+1}, Day=${mAsAny.iDate()}`);
+    } else {
+      console.log('Methods not available in module-loaded moment');
+    }
+  } catch (error) {
+    console.error("Error in Hijri debug:", error);
+  }
+  console.log("===========================================");
+}
+
+// Call the debug function to check
+setTimeout(() => {
+  debugHijriDate();
+}, 2000);
+
+// Define types for prayer calculation settings
+interface PrayerSettings {
+  calculationMethod: string;
+  asrMethod: string;
+  highLatitudeMethod: string;
+  adjustments: {
+    fajr: number;
+    sunrise: number;
+    dhuhr: number;
+    asr: number;
+    maghrib: number;
+    isha: number;
+  };
+  angles: {
+    fajr: number;
+    isha: number;
+  };
+  hijriDateAdjustment: number; // Add this field
+}
+
+// Define the different calculation methods available
+const CALCULATION_METHODS = {
+  MUSLIM_WORLD_LEAGUE: "Muslim World League",
+  NORTH_AMERICA: "Islamic Society of North America (ISNA)",
+  EGYPT: "Egyptian General Authority of Survey",
+  MAKKAH: "Umm al-Qura University, Makkah",
+  KARACHI: "University of Islamic Sciences, Karachi",
+  TEHRAN: "Institute of Geophysics, University of Tehran",
+  JAFARI: "Shia Ithna Ashari, Leva Research Institute, Qum",
+  GULF: "Gulf Region",
+  KUWAIT: "Kuwait",
+  QATAR: "Qatar",
+  SINGAPORE: "Majlis Ugama Islam Singapura, Singapore",
+  FRANCE: "Union Organization Islamic de France",
+  TURKEY: "Diyanet İşleri Başkanlığı, Turkey",
+  RUSSIA: "Spiritual Administration of Muslims of Russia",
+  MOONSIGHTING: "Moonsighting Committee Worldwide",
+  DUBAI: "Dubai, UAE",
+  JAKIM: "Jabatan Kemajuan Islam Malaysia",
+  TUNISIA: "Tunisia",
+  ALGERIA: "Algeria",
+  KEMENAG: "Kementerian Agama Republik Indonesia",
+  MOROCCO: "Morocco",
+  PORTUGAL: "Comunidate Islamica de Lisboa",
+  CUSTOM: "Custom"
+};
+
+// Define Asr calculation methods
+const ASR_METHODS = {
+  STANDARD: "Standard (Shafi'i, Maliki, Hanbali)",
+  HANAFI: "Hanafi"
+};
+
+// Create a mapping from string values to numeric Madhab values
+const MADHAB_VALUES = {
+  [ASR_METHODS.STANDARD]: 0, // Shafi'i (value for Standard)
+  [ASR_METHODS.HANAFI]: 1    // Hanafi
+};
+
+// Define high latitude adjustment methods
+const HIGH_LATITUDE_METHODS = {
+  NONE: "None",
+  MIDDLE_OF_NIGHT: "Middle of Night",
+  SEVENTH_OF_NIGHT: "Seventh of Night",
+  TWILIGHT_ANGLE: "Twilight Angle",
+  ANGLE_BASED: "Angle Based",
+  NEAREST_LATITUDE: "Nearest Latitude",
+  NEAREST_GOOD_DAY: "Nearest Good Day"
+};
+
+// Create a mapping from string values to proper HighLatitudeRule enum values
+const HIGH_LATITUDE_VALUES = {
+  [HIGH_LATITUDE_METHODS.MIDDLE_OF_NIGHT]: HighLatitudeRule.MiddleOfTheNight,
+  [HIGH_LATITUDE_METHODS.SEVENTH_OF_NIGHT]: HighLatitudeRule.SeventhOfTheNight,
+  [HIGH_LATITUDE_METHODS.TWILIGHT_ANGLE]: HighLatitudeRule.TwilightAngle
+};
+
+// Default coordinates (Memphis, TN)
+let defaultCoordinates = {
+  latitude: 35.1581204, 
+  longitude: -89.9086143
+};
+
+// Default city name and timezone
+let currentCity = "Memphis";
+let currentCountry = "USA";
+let currentTimezone = "America/Chicago";
+
+// Default prayer settings
+let prayerSettings: PrayerSettings = {
+  calculationMethod: CALCULATION_METHODS.MOONSIGHTING,
+  asrMethod: ASR_METHODS.STANDARD,
+  highLatitudeMethod: HIGH_LATITUDE_METHODS.NONE,
+  adjustments: {
+    fajr: 0,
+    sunrise: 0,
+    dhuhr: 0,
+    asr: 0,
+    maghrib: 0,
+    isha: 0
+  },
+  angles: {
+    fajr: 18, // Default
+    isha: 18  // Default
+  },
+  hijriDateAdjustment: 0 // Default no adjustment for Hijri date
+};
+
+// Variable to store original settings for comparison when saving
+let originalPrayerSettings: PrayerSettings;
+
+// Initialize variables with placeholder values
+let prayerTimes: PrayerTimes;
+let sunnahTimes: SunnahTimes;
+let tomorrowPrayerTimes: PrayerTimes;
+let nextPrayerInfo: { name: string, time: Date };
+let nextPrayerTime: Date;
+let currentPrayerValue: Prayer;
+let qiblaDirection = "";
+let hijriDate = "";
+let athanPlayed = false;
+
+// Keep track of all loaded cities for search
+let allCities: City[] = [];
+let searchResults: City[] = [];
+
+// Add a simple rate limiter for Nominatim API
+const nominatimRateLimiter = {
+  lastRequestTime: 0,
+  minTimeGap: 1000, // Wait at least 1 second between requests as per their usage policy
+  
+  async waitForNext(): Promise<void> {
+    const now = Date.now();
+    const timeSinceLastRequest = now - this.lastRequestTime;
+    
+    if (timeSinceLastRequest < this.minTimeGap) {
+      const timeToWait = this.minTimeGap - timeSinceLastRequest;
+      console.log(`Rate limiting Nominatim API, waiting ${timeToWait}ms`);
+      await new Promise(resolve => setTimeout(resolve, timeToWait));
+    }
+    
+    this.lastRequestTime = Date.now();
+  }
+};
+
+// Register service worker for offline functionality
+function registerServiceWorker() {
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('/src/service-worker.js')
+        .then(registration => {
+          console.log('ServiceWorker registration successful with scope: ', registration.scope);
+        })
+        .catch(error => {
+          console.error('ServiceWorker registration failed: ', error);
+          // Even if SW fails, app should still work with localStorage
+          ensureLocalStorage();
+        });
+    });
+  } else {
+    console.log('Service Workers are not supported in this browser');
+    // Fallback to localStorage only
+    ensureLocalStorage();
+  }
+}
+
+// Ensure localStorage is working for offline functionality
+function ensureLocalStorage() {
+  try {
+    // Test localStorage
+    localStorage.setItem('test', 'test');
+    localStorage.removeItem('test');
+    console.log('LocalStorage is available for offline data');
+  } catch (e) {
+    console.error('LocalStorage is not available. Some offline features may not work.', e);
+    // Could add a notification to the user here
+  }
+}
+
+// Function to check and update online/offline status
+function updateOnlineStatus() {
+  const isOnline = navigator.onLine;
+  console.log(`App is ${isOnline ? 'online' : 'offline'}`);
+  
+  // Update status indicator if it exists
+  const statusElement = document.getElementById('connection-status');
+  if (statusElement) {
+    statusElement.className = isOnline ? 'connection-status online-indicator' : 'connection-status offline-indicator';
+    statusElement.title = isOnline ? 'Online' : 'Offline - App Working Locally';
+    statusElement.textContent = '●';
+  }
+}
+
+// Listen for online/offline events
+window.addEventListener('online', updateOnlineStatus);
+window.addEventListener('offline', updateOnlineStatus);
+
+// Define available athan sounds
+const athanSounds = [
+  { name: "Makkah Athan", file: "/sounds/a1.mp3", elementId: "athan1", isCustom: false },
+  { name: "Madinah Athan", file: "/sounds/a2.mp3", elementId: "athan2", isCustom: false }
+];
+
+// Custom user athan sounds array - will be loaded from storage
+let customAthanSounds: { name: string, file: string, elementId: string, isCustom: boolean }[] = [];
+
+// Cache for preloaded audio files
+const audioCache: {[key: string]: HTMLAudioElement} = {};
+
+// Load custom athan sounds from IndexedDB
+async function loadCustomAthans() {
+  try {
+    // Check if IndexedDB is supported
+    if (!window.indexedDB) {
+      console.log('IndexedDB not supported - custom athans will not be available');
+      return;
+    }
+    
+    // Open or create the database
+    const dbRequest = indexedDB.open('AthanDB', 1);
+    
+    // Set up the database schema if it's a new database
+    dbRequest.onupgradeneeded = function(event: IDBVersionChangeEvent) {
+      const db = (event.target as IDBOpenDBRequest).result;
+      
+      // Create an object store for athans if it doesn't exist
+      if (!db.objectStoreNames.contains('athans')) {
+        const store = db.createObjectStore('athans', { keyPath: 'elementId' });
+        store.createIndex('name', 'name', { unique: false });
+      }
+    };
+    
+    // Handle database open success
+    dbRequest.onsuccess = function(event: Event) {
+      const db = (event.target as IDBOpenDBRequest).result;
+      
+      // Get all custom athans from the store
+      const transaction = db.transaction(['athans'], 'readonly');
+      const store = transaction.objectStore('athans');
+      const getAllRequest = store.getAll();
+      
+      getAllRequest.onsuccess = function() {
+        // Update the custom athan sounds array
+        customAthanSounds = getAllRequest.result || [];
+        console.log(`Loaded ${customAthanSounds.length} custom athans from IndexedDB`);
+        
+        // Create audio elements for the custom athans
+        customAthanSounds.forEach(sound => {
+          createAudioElement(sound);
+        });
+      };
+      
+      transaction.oncomplete = function() {
+        db.close();
+      };
+    };
+    
+    // Handle database open error
+    dbRequest.onerror = function(event: Event) {
+      console.error('Error opening IndexedDB:', (event.target as IDBOpenDBRequest).error);
+    };
+  } catch (error) {
+    console.error('Error loading custom athans:', error);
+  }
+}
+
+// Function to create audio element for athan
+function createAudioElement(sound: { elementId: string, file: string }) {
+  // Check if element already exists
+  if (document.getElementById(sound.elementId)) {
+    return;
+  }
+  
+  // Create new audio element
+  const audioElement = document.createElement('audio');
+  audioElement.id = sound.elementId;
+  audioElement.preload = 'auto';
+  
+  // For custom athans stored as data URLs
+  if (sound.file.startsWith('data:')) {
+    audioElement.src = sound.file;
+  } else {
+    audioElement.src = sound.file;
+  }
+  
+  // Append to the body
+  document.body.appendChild(audioElement);
+  console.log(`Created audio element with ID ${sound.elementId}`);
+}
+
+// Save a custom athan to IndexedDB
+async function saveCustomAthan(name: string, fileData: string, elementId: string) {
+  try {
+    // Check if IndexedDB is supported
+    if (!window.indexedDB) {
+      console.error('IndexedDB not supported - custom athans cannot be saved');
+      return false;
+    }
+    
+    // Open the database
+    const dbRequest = indexedDB.open('AthanDB', 1);
+    
+    // Handle database open success
+    dbRequest.onsuccess = function(event: Event) {
+      const db = (event.target as IDBOpenDBRequest).result;
+      
+      // Create a transaction to add the athan
+      const transaction = db.transaction(['athans'], 'readwrite');
+      const store = transaction.objectStore('athans');
+      
+      // Create the athan object
+      const athan = {
+        name: name,
+        file: fileData,
+        elementId: elementId,
+        isCustom: true,
+        dateAdded: new Date().toISOString()
+      };
+      
+      // Add the athan to the store
+      const addRequest = store.put(athan);
+      
+      addRequest.onsuccess = function() {
+        console.log(`Custom athan "${name}" saved successfully`);
+        
+        // Add to the custom athan sounds array
+        customAthanSounds.push(athan);
+        
+        // Create audio element for the new athan
+        createAudioElement(athan);
+        
+        // Show success message
+        showToast('Custom athan added successfully');
+        
+        // Regenerate the settings modal to include the new athan
+        generateSettingsModal();
+      };
+      
+      addRequest.onerror = function() {
+        console.error('Error saving custom athan:', addRequest.error);
+        showToast('Error adding custom athan');
+      };
+      
+      transaction.oncomplete = function() {
+        db.close();
+      };
+    };
+    
+    // Handle database open error
+    dbRequest.onerror = function(event: Event) {
+      console.error('Error opening IndexedDB:', (event.target as IDBOpenDBRequest).error);
+      return false;
+    };
+    
+    return true;
+  } catch (error) {
+    console.error('Error saving custom athan:', error);
+    return false;
+  }
+}
+
+// Delete a custom athan from IndexedDB
+async function deleteCustomAthan(elementId: string) {
+  try {
+    // Check if IndexedDB is supported
+    if (!window.indexedDB) {
+      console.error('IndexedDB not supported - custom athans cannot be deleted');
+      return false;
+    }
+    
+    // Open the database
+    const dbRequest = indexedDB.open('AthanDB', 1);
+    
+    // Handle database open success
+    dbRequest.onsuccess = function(event: Event) {
+      const db = (event.target as IDBOpenDBRequest).result;
+      
+      // Create a transaction to delete the athan
+      const transaction = db.transaction(['athans'], 'readwrite');
+      const store = transaction.objectStore('athans');
+      
+      // Delete the athan from the store
+      const deleteRequest = store.delete(elementId);
+      
+      deleteRequest.onsuccess = function() {
+        console.log(`Custom athan with ID ${elementId} deleted successfully`);
+        
+        // Remove from the custom athan sounds array
+        customAthanSounds = customAthanSounds.filter(sound => sound.elementId !== elementId);
+        
+        // Remove the audio element
+        const audioElement = document.getElementById(elementId);
+        if (audioElement) {
+          document.body.removeChild(audioElement);
+        }
+        
+        // Show success message
+        showToast('Custom athan deleted successfully');
+        
+        // Regenerate the settings modal to reflect the change
+        generateSettingsModal();
+      };
+      
+      deleteRequest.onerror = function() {
+        console.error('Error deleting custom athan:', deleteRequest.error);
+        showToast('Error deleting custom athan');
+      };
+      
+      transaction.oncomplete = function() {
+        db.close();
+      };
+    };
+    
+    // Handle database open error
+    dbRequest.onerror = function(event: Event) {
+      console.error('Error opening IndexedDB:', (event.target as IDBOpenDBRequest).error);
+      return false;
+    };
+    
+    return true;
+  } catch (error) {
+    console.error('Error deleting custom athan:', error);
+    return false;
+  }
+}
+
+// Preload athan audio files
+function preloadAthanSounds() {
+  // Preload default athans
+  athanSounds.forEach(sound => {
+    try {
+      console.log(`Attempting to preload: ${sound.file}`);
+      // First, try to get from cache
+      caches.match(sound.file).then(response => {
+        if (response) {
+          console.log(`Found ${sound.file} in cache`);
+        } else {
+          console.log(`${sound.file} not in cache, preloading...`);
+          // Using the audio element for preloading
+          const audioElement = document.getElementById(sound.elementId) as HTMLAudioElement;
+          if (audioElement) {
+            audioElement.load();
+            audioElement.addEventListener('canplaythrough', () => {
+              console.log(`Successfully preloaded: ${sound.file} via element`);
+            });
+            audioElement.addEventListener('error', (e) => {
+              console.error(`Error preloading element ${sound.elementId}:`, e);
+            });
+          }
+        }
+      });
+    } catch (error) {
+      console.error(`Error setting up audio for ${sound.file}:`, error);
+    }
+  });
+  
+  // Preload custom athans
+  customAthanSounds.forEach(sound => {
+    try {
+      console.log(`Attempting to preload custom athan: ${sound.name}`);
+      const audioElement = document.getElementById(sound.elementId) as HTMLAudioElement;
+      if (audioElement) {
+        audioElement.load();
+      }
+    } catch (error) {
+      console.error(`Error preloading custom athan ${sound.name}:`, error);
+    }
+  });
+}
+
+// Initialize localStorage for athan preferences
+function initializeStorage() {
+  // Check if we've already initialized storage
+  if (!localStorage.getItem('athanInitialized')) {
+    console.log('Initializing athan storage...');
+    
+    // Set default athan choice
+    if (!localStorage.getItem('selectedAthan')) {
+      localStorage.setItem('selectedAthan', athanSounds[0].elementId);
+    }
+    
+    // Mark as initialized
+    localStorage.setItem('athanInitialized', 'true');
+  }
+  
+  // Load custom athans
+  loadCustomAthans();
+  
+  // Preload audio files regardless of initialization status
+  preloadAthanSounds();
+}
+
+// Get currently selected athan
+function getSelectedAthan(): string {
+  return localStorage.getItem('selectedAthan') || athanSounds[0].elementId;
+}
+
+// Play athan sound
+function playAthan() {
+  const selectedAthanId = getSelectedAthan();
+  console.log(`Attempting to play athan: ${selectedAthanId}`);
+  
+  try {
+    // Get the audio element from the document
+    const audioElement = document.getElementById(selectedAthanId) as HTMLAudioElement;
+    
+    if (audioElement) {
+      // Ensure it's reset to the beginning
+      audioElement.currentTime = 0;
+      
+      // Play the audio
+      audioElement.play()
+        .then(() => {
+          console.log(`Successfully started playing athan: ${selectedAthanId}`);
+        })
+        .catch(error => {
+          console.error(`Error playing athan ${selectedAthanId}:`, error);
+        });
+    } else {
+      console.error(`Audio element with ID ${selectedAthanId} not found`);
+    }
+  } catch (error) {
+    console.error('Critical error in playAthan function:', error);
+  }
+}
+
+// Play a specific athan by its element ID (for preview)
+function playAthanById(elementId: string) {
+  console.log(`Attempting to play athan preview: ${elementId}`);
+  
+  try {
+    // Get the audio element from the document
+    const audioElement = document.getElementById(elementId) as HTMLAudioElement;
+    
+    if (audioElement) {
+      // Ensure it's reset to the beginning
+      audioElement.currentTime = 0;
+      
+      // Play the audio
+      audioElement.play()
+        .then(() => {
+          console.log(`Successfully started playing athan preview: ${elementId}`);
+        })
+        .catch(error => {
+          console.error(`Error playing athan preview ${elementId}:`, error);
+        });
+    } else {
+      console.error(`Audio element with ID ${elementId} not found for preview`);
+    }
+  } catch (error) {
+    console.error('Critical error in playAthanById function:', error);
+  }
+}
+
+// Stop playing athan (for preview)
+function stopAthanPlayback() {
+  // Stop all audio elements
+  const audioElements = document.querySelectorAll('audio');
+  audioElements.forEach(audio => {
+    if (!audio.paused) {
+      audio.pause();
+      audio.currentTime = 0;
+    }
+  });
+}
+
+// Change selected athan
+function changeAthan(event: Event) {
+  const select = event.target as HTMLSelectElement;
+  localStorage.setItem('selectedAthan', select.value);
+  console.log('Athan changed to:', select.value);
+}
+
+function prayerName(prayer: Prayer) {
+  if (prayer === Prayer.Fajr) {
+    return "Fajr";
+  } else if (prayer === Prayer.Sunrise) {
+    return "Sunrise";
+  } else if (prayer === Prayer.Dhuhr) {
+    return "Dhuhr";
+  } else if (prayer === Prayer.Asr) {
+    return "Asr";
+  } else if (prayer === Prayer.Maghrib) {
+    return "Maghrib";
+  } else if (prayer === Prayer.Isha) {
+    return "Isha";
+  } else if (prayer === Prayer.None) {
+    return "None";
+  }
+}
+
+// Calculate time remaining until next prayer
+function getTimeRemaining(nextPrayer: Date): string {
+  const now = new Date();
+  const diff = nextPrayer.getTime() - now.getTime();
+  
+  if (diff <= 0) return "Now";
+  
+  const hours = Math.floor(diff / (1000 * 60 * 60));
+  const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+  const seconds = Math.floor((diff % (1000 * 60)) / 1000);
+  
+  // Format with leading zeros without using padStart
+  const formattedHours = hours < 10 ? `0${hours}` : `${hours}`;
+  const formattedMinutes = minutes < 10 ? `0${minutes}` : `${minutes}`;
+  const formattedSeconds = seconds < 10 ? `0${seconds}` : `${seconds}`;
+  
+  return `${formattedHours}:${formattedMinutes}:${formattedSeconds}`;
+}
+
+// Get next prayer
+function getNextPrayer(): { name: string, time: Date } {
+  if (!prayerTimes) {
+    // Return default value if prayerTimes not initialized yet
+    return { name: "Loading...", time: new Date() };
+  }
+  
+  const prayers = [
+    { name: "Fajr", time: prayerTimes.fajr },
+    { name: "Sunrise", time: prayerTimes.sunrise },
+    { name: "Dhuhr", time: prayerTimes.dhuhr },
+    { name: "Asr", time: prayerTimes.asr },
+    { name: "Maghrib", time: prayerTimes.maghrib },
+    { name: "Isha", time: prayerTimes.isha }
+  ];
+  
+  const now = new Date();
+  const nextPrayers = prayers.filter(prayer => prayer.time > now);
+  
+  if (nextPrayers.length === 0) {
+    // If all prayers for today have passed, return Fajr for tomorrow
+    if (!tomorrowPrayerTimes) {
+      return { name: "Loading...", time: new Date() };
+    }
+    return { name: "Fajr (Tomorrow)", time: tomorrowPrayerTimes.fajr };
+  }
+  
+  return nextPrayers[0];
+}
+
+// Format time without date
+function formatTimeOnly(date: Date): string {
+  return moment(date).tz(currentTimezone).format("h:mm A");
+}
+
+// Get Islamic/Hijri date
+function getHijriDate(): string {
+  // Islamic months with proper names in English
+  const islamicMonths = [
+    "Muharram", "Safar", "Rabi al-Awwal", "Rabi al-Thani", 
+    "Jumada al-Awwal", "Jumada al-Thani", "Rajab", "Sha'ban", 
+    "Ramadan", "Shawwal", "Dhu al-Qi'dah", "Dhu al-Hijjah"
+  ];
+  
+  try {
+    // Use the browser-loaded moment-hijri which is working correctly
+    if (typeof window !== 'undefined' && window.moment) {
+      // Create a date with current timezone
+      const browserMoment = window.moment();
+      
+      // Apply adjustment if needed
+      if (prayerSettings.hijriDateAdjustment !== 0) {
+        browserMoment.add(prayerSettings.hijriDateAdjustment, 'days');
+      }
+      
+      // Use type assertion to access moment-hijri methods
+      const hijriMoment = browserMoment as any;
+      
+      // Get the components - we know from debug this works
+      const day = hijriMoment.iDate();
+      const month = hijriMoment.iMonth();
+      const year = hijriMoment.iYear();
+      
+      console.log('Browser moment-hijri result:', { day, month, year, monthName: islamicMonths[month] });
+      
+      // Return the formatted date using the English month name from our array
+      return `${day} ${islamicMonths[month]} ${year}`;
+    }
+    
+    // Fallback to simple approximation
+    throw new Error('Browser-loaded moment-hijri not available');
+    
+  } catch (error) {
+    console.error("Error calculating Hijri date:", error);
+    
+    // Simple fallback if the main calculation fails
+    try {
+      // Get current date
+      const today = new Date();
+      
+      // Apply adjustment if needed
+      if (prayerSettings.hijriDateAdjustment !== 0) {
+        today.setDate(today.getDate() + prayerSettings.hijriDateAdjustment);
+      }
+      
+      // Simple formula for approximating Hijri year
+      const gregorianYear = today.getFullYear();
+      const gregorianMonth = today.getMonth() + 1; // 1-based month
+      const gregorianDay = today.getDate();
+      
+      const hijriYear = Math.floor(gregorianYear - 621.5 + 
+        (gregorianMonth > 2 ? 0 : -1) + 
+        (gregorianMonth === 1 && gregorianDay < 15 ? -1 : 0));
+      
+      // Approximate month (rough estimation)
+      const monthShift = Math.floor((gregorianMonth + 9) % 12);
+      const hijriMonth = monthShift < 0 ? monthShift + 12 : monthShift;
+      
+      // Approximate day
+      const hijriDay = Math.min(gregorianDay, 30);
+      
+      console.log('Simple Hijri approximation (fallback):', {
+        day: hijriDay,
+        month: hijriMonth,
+        year: hijriYear
+      });
+      
+      return `${hijriDay} ${islamicMonths[hijriMonth]} ${hijriYear}`;
+    } catch (fallbackError) {
+      console.error("Even fallback calculation failed:", fallbackError);
+      return "Error calculating Hijri date";
+    }
+  }
+}
+
+// Function to get calculation parameters based on the selected method
+function getCalculationParameters(): CalculationParameters {
+  let params: CalculationParameters;
+  
+  try {
+    // Select the base calculation method
+    switch (prayerSettings.calculationMethod) {
+      case CALCULATION_METHODS.MUSLIM_WORLD_LEAGUE:
+        params = CalculationMethod.MuslimWorldLeague();
+        break;
+      case CALCULATION_METHODS.NORTH_AMERICA:
+        params = CalculationMethod.NorthAmerica();
+        break;
+      case CALCULATION_METHODS.EGYPT:
+        params = CalculationMethod.Egyptian();
+        break;
+      case CALCULATION_METHODS.MAKKAH:
+        params = CalculationMethod.UmmAlQura();
+        break;
+      case CALCULATION_METHODS.KARACHI:
+        params = CalculationMethod.Karachi();
+        break;
+      case CALCULATION_METHODS.TEHRAN:
+        params = CalculationMethod.Tehran();
+        break;
+      // Note: Some methods may not be directly available in the adhan library
+      // so we use custom parameters for them
+      case CALCULATION_METHODS.JAFARI:
+        // Create custom parameters for Jafari method
+        params = new CalculationParameters("Jafari", 16, 14);
+        params.maghribAngle = 4;
+        break;
+      case CALCULATION_METHODS.GULF:
+        // Create custom parameters for Gulf region
+        params = new CalculationParameters("Gulf", 19.5, 0);
+        params.ishaInterval = 90; // 90 minutes after maghrib
+        break;
+      case CALCULATION_METHODS.KUWAIT:
+        params = new CalculationParameters("Kuwait", 18, 17.5);
+        break;
+      case CALCULATION_METHODS.QATAR:
+        params = new CalculationParameters("Qatar", 18, 0);
+        params.ishaInterval = 90; // 90 minutes after maghrib
+        break;
+      case CALCULATION_METHODS.SINGAPORE:
+        params = new CalculationParameters("Singapore", 20, 18);
+        break;
+      case CALCULATION_METHODS.TURKEY:
+        params = new CalculationParameters("Turkey", 18, 17);
+        break;
+      case CALCULATION_METHODS.MOONSIGHTING:
+        params = CalculationMethod.MoonsightingCommittee();
+        break;
+      case CALCULATION_METHODS.DUBAI:
+        params = new CalculationParameters("Dubai", 18.2, 18.2);
+        break;
+      case CALCULATION_METHODS.CUSTOM:
+        // For custom method, create parameters from user settings
+        params = new CalculationParameters('Custom', prayerSettings.angles.fajr, prayerSettings.angles.isha);
+        break;
+      default:
+        // Default to Moonsighting Committee
+        params = CalculationMethod.MoonsightingCommittee();
+    }
+    
+    // Set Asr calculation method with validation using Madhab enum
+    if (prayerSettings.asrMethod === ASR_METHODS.HANAFI) {
+      params.madhab = Madhab.Hanafi;
+      console.log(`Using Asr madhab value: Hanafi for method: ${prayerSettings.asrMethod}`);
+    } else {
+      console.log(`Using Asr madhab value: Shafi for method: ${prayerSettings.asrMethod}`);
+      params.madhab = Madhab.Shafi;
+    }
+    
+    // Set high latitude rule with validation using HighLatitudeRule enum
+    switch (prayerSettings.highLatitudeMethod) {
+      case HIGH_LATITUDE_METHODS.MIDDLE_OF_NIGHT:
+      case HIGH_LATITUDE_METHODS.SEVENTH_OF_NIGHT:
+      case HIGH_LATITUDE_METHODS.TWILIGHT_ANGLE:
+        // Use the pre-defined mapping for valid high latitude rules
+        params.highLatitudeRule = HIGH_LATITUDE_VALUES[prayerSettings.highLatitudeMethod];
+        console.log(`Using high latitude rule: ${prayerSettings.highLatitudeMethod}`);
+        break;
+      default:
+        // Default to MiddleOfTheNight for any other values
+        params.highLatitudeRule = HighLatitudeRule.MiddleOfTheNight;
+        console.log(`Using default high latitude rule: MiddleOfTheNight for method: ${prayerSettings.highLatitudeMethod}`);
+    }
+    
+    // If using custom method, apply the custom angles
+    if (prayerSettings.calculationMethod === CALCULATION_METHODS.CUSTOM) {
+      params.fajrAngle = parseFloat(prayerSettings.angles.fajr.toString()) || 18;
+      params.ishaAngle = parseFloat(prayerSettings.angles.isha.toString()) || 18;
+      console.log(`Using custom angles - Fajr: ${params.fajrAngle}, Isha: ${params.ishaAngle}`);
+    }
+    
+    // Apply prayer time adjustments (in minutes) with validation
+    const adjustments = {
+      fajr: parseInt(prayerSettings.adjustments.fajr?.toString() || '0', 10) || 0,
+      sunrise: parseInt(prayerSettings.adjustments.sunrise?.toString() || '0', 10) || 0,
+      dhuhr: parseInt(prayerSettings.adjustments.dhuhr?.toString() || '0', 10) || 0,
+      asr: parseInt(prayerSettings.adjustments.asr?.toString() || '0', 10) || 0,
+      maghrib: parseInt(prayerSettings.adjustments.maghrib?.toString() || '0', 10) || 0,
+      isha: parseInt(prayerSettings.adjustments.isha?.toString() || '0', 10) || 0
+    };
+    
+    console.log(`Using time adjustments:`, adjustments);
+    params.adjustments = adjustments;
+    
+    // Log the final parameters for debugging
+    console.log('Final prayer calculation parameters:', {
+      method: params.method,
+      fajrAngle: params.fajrAngle,
+      ishaAngle: params.ishaAngle,
+      ishaInterval: params.ishaInterval,
+      madhab: params.madhab,
+      highLatitudeRule: params.highLatitudeRule,
+      adjustments: params.adjustments
+    });
+    
+    return params;
+  } catch (error) {
+    console.error('Error setting up prayer calculation parameters:', error);
+    // Return default parameters in case of error
+    console.warn('Falling back to default parameters (Moonsighting Committee)');
+    return CalculationMethod.MoonsightingCommittee();
+  }
+}
+
+// Initialize only the prayer time calculations with current settings
+function initializeAppWithSettings() {
+  try {
+    // Create coordinates object from stored values
+    const coordinates = new Coordinates(defaultCoordinates.latitude, defaultCoordinates.longitude);
+    
+    // Get calculation parameters based on settings
+    const params = getCalculationParameters();
+    
+    const currentDate = new Date();
+    
+    console.log("Initializing prayer times with parameters:", {
+      method: params.method,
+      madhab: params.madhab,
+      highLatitudeRule: params.highLatitudeRule,
+      adjustments: params.adjustments
+    });
+    
+    // Initialize prayer times with proper error handling
+    try {
+      prayerTimes = new PrayerTimes(coordinates, currentDate, params);
+      sunnahTimes = new SunnahTimes(prayerTimes);
+      
+      // Calculate tomorrow's prayer times
+      const tomorrow = new Date();
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      tomorrowPrayerTimes = new PrayerTimes(coordinates, tomorrow, params);
+    } catch (error) {
+      console.error("Critical error creating prayer times:", error);
+      // Create with safe default parameters to avoid crashes
+      const defaultParams = CalculationMethod.MoonsightingCommittee();
+      prayerTimes = new PrayerTimes(coordinates, currentDate, defaultParams);
+      sunnahTimes = new SunnahTimes(prayerTimes);
+      
+      const tomorrow = new Date();
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      tomorrowPrayerTimes = new PrayerTimes(coordinates, tomorrow, defaultParams);
+    }
+    
+    // Update other values
+    try {
+      currentPrayerValue = prayerTimes.currentPrayer();
+    } catch (error) {
+      console.error("Error determining current prayer:", error);
+      currentPrayerValue = Prayer.None;
+    }
+    
+    // Get next prayer
+    nextPrayerInfo = getNextPrayer();
+    nextPrayerTime = nextPrayerInfo.time;
+  } catch (error) {
+    console.error("Fatal error in initializeAppWithSettings:", error);
+    createDefaultPrayerTimes();
+  }
+}
+
+// Create default prayer times as a last resort to prevent crashes
+function createDefaultPrayerTimes() {
+  console.warn("Creating default prayer times as failsafe");
+  
+  // Use default coordinates and parameters
+  const coordinates = new Coordinates(21.3891, 39.8579); // Mecca coordinates as fallback
+  const params = CalculationMethod.MoonsightingCommittee();
+  const currentDate = new Date();
+  
+  // Create prayer times
+  prayerTimes = new PrayerTimes(coordinates, currentDate, params);
+  sunnahTimes = new SunnahTimes(prayerTimes);
+  
+  // Create tomorrow prayer times
+  const tomorrow = new Date();
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  tomorrowPrayerTimes = new PrayerTimes(coordinates, tomorrow, params);
+  
+  // Set current prayer value
+  currentPrayerValue = Prayer.None;
+  
+  // Create default next prayer info
+  const oneHourLater = new Date();
+  oneHourLater.setHours(oneHourLater.getHours() + 1);
+  nextPrayerInfo = { name: "Unknown", time: oneHourLater };
+  nextPrayerTime = oneHourLater;
+}
+
+// Main app initialization function
+function initializeApp() {
+  try {
+    // Load prayer settings first
+    loadPrayerSettings();
+    
+    // Calculate prayer times using the loaded settings
+    initializeAppWithSettings();
+    
+    // Other one-time initializations
+    qiblaDirection = Qibla(new Coordinates(defaultCoordinates.latitude, defaultCoordinates.longitude)).toFixed(2);
+    hijriDate = getHijriDate();
+  } catch (error) {
+    console.error('Critical error in app initialization:', error);
+    
+    // Set default values for nextPrayerInfo to avoid undefined errors
+    if (!nextPrayerInfo) {
+      const oneHourLater = new Date();
+      oneHourLater.setHours(oneHourLater.getHours() + 1);
+      nextPrayerInfo = { name: "Unknown", time: oneHourLater };
+      nextPrayerTime = oneHourLater;
+    }
+    
+    alert('There was a problem initializing the prayer times. Please refresh the page or contact support.');
+  }
+}
+
+// Initialize with stored location if available
+function initializeLocation() {
+  const storedLat = localStorage.getItem('prayer_latitude');
+  const storedLng = localStorage.getItem('prayer_longitude');
+  const storedCity = localStorage.getItem('prayer_city');
+  const storedCountry = localStorage.getItem('prayer_country');
+  const storedTimezone = localStorage.getItem('prayer_timezone');
+  
+  if (storedLat && storedLng) {
+    defaultCoordinates = {
+      latitude: parseFloat(storedLat),
+      longitude: parseFloat(storedLng)
+    };
+    
+    if (storedCity) currentCity = storedCity;
+    if (storedCountry) currentCountry = storedCountry;
+    if (storedTimezone) currentTimezone = storedTimezone;
+    
+    console.log(`Using stored location: ${currentCity}, ${currentCountry}`);
+    
+    // Re-initialize with stored coordinates
+    initializeApp();
+  } else {
+    // Try to get user's location
+    setTimeout(promptForLocation, 1000);
+  }
+}
+
+// Show city selection modal
+function showCitySelectionModal() {
+  const modal = document.getElementById('city-modal');
+  if (modal) {
+    modal.classList.add('active');
+  }
+  
+  // Load initial city results if needed
+  const resultsContainer = document.getElementById('city-results');
+  if (resultsContainer) {
+    resultsContainer.innerHTML = `
+      <div class="location-info-message">
+        <p>Search for your city above or use geolocation to find your location automatically.</p>
+        <p>Type at least 2 characters to search for cities.</p>
+      </div>
+    `;
+  }
+}
+
+// Close city selection modal
+function closeCitySelectionModal() {
+  const modal = document.getElementById('city-modal');
+  if (modal) {
+    modal.classList.remove('active');
+  }
+}
+
+// Prompt user for location
+function promptForLocation() {
+  // Show the city modal for searching
+  showCitySelectionModal();
+  
+  // Load cities in the background for fallback
+  loadCities().then(cities => {
+    allCities = cities;
+    console.log(`Loaded ${cities.length} cities as fallback data`);
+  }).catch(error => {
+    console.error('Error loading cities data:', error);
+  });
+}
+
+// Function to generate the city selection modal HTML
+function generateCitySelectionModal() {
+  const modalHTML = `
+    <div id="city-modal" class="modal">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2>Select Your Location</h2>
+          <button id="close-city-modal" class="close-button">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="search-container">
+            <input type="text" id="city-search" placeholder="Search for city..." autocomplete="off">
+            <button id="use-location-btn" class="location-btn" title="Use my current location">
+              <i>◎</i> Use My Current Location
+            </button>
+          </div>
+          <div id="city-results" class="city-results"></div>
+        </div>
+      </div>
+    </div>
+  `;
+  
+  // Append to body if not already present
+  if (!document.getElementById('city-modal')) {
+    const modalContainer = document.createElement('div');
+    modalContainer.innerHTML = modalHTML;
+    document.body.appendChild(modalContainer);
+  }
+}
+
+// Update location and recalculate prayer times
+function updateLocationAndPrayerTimes(lat: number, lng: number, cityName?: string, countryName?: string) {
+  defaultCoordinates = {
+    latitude: lat,
+    longitude: lng
+  };
+  
+  // If city or country name is not provided, try to get it from Nominatim
+  if (!cityName || !countryName) {
+    getLocationDetailsFromCoordinates(lat, lng)
+      .then(details => {
+        if (details) {
+          currentCity = details.city;
+          currentCountry = details.country;
+          
+          // Store in localStorage
+          localStorage.setItem('prayer_city', details.city);
+          localStorage.setItem('prayer_country', details.country);
+          
+          // Update UI to show the retrieved location name
+          const locationNameElement = document.getElementById('location-name');
+          if (locationNameElement) {
+            locationNameElement.innerHTML = `
+              ${details.city}, ${details.country}
+              <button class="city-change-btn" id="change-location-btn" title="Change Location">
+                ◎
+              </button>
+            `;
+          }
+        }
+      })
+      .catch(error => {
+        console.error('Error getting location details:', error);
+      });
+  } else {
+    if (cityName) currentCity = cityName;
+    if (countryName) currentCountry = countryName;
+    
+    // Store in localStorage
+    if (cityName) localStorage.setItem('prayer_city', cityName);
+    if (countryName) localStorage.setItem('prayer_country', countryName);
+  }
+  
+  // Store location in localStorage
+  localStorage.setItem('prayer_latitude', lat.toString());
+  localStorage.setItem('prayer_longitude', lng.toString());
+  
+  // Reinitialize prayer times with new coordinates
+  initializeApp();
+  
+  // Update the UI by regenerating the HTML
+  generateHTML();
+}
+
+// Get user's location with improved error handling
+function getUserLocationWrapper(): Promise<{lat: number, lng: number}> {
+  return new Promise((resolve, reject) => {
+    // Show a simple loading indicator
+    const locationBtn = document.getElementById('use-location-btn');
+    if (locationBtn) {
+      locationBtn.innerHTML = '<i>◎</i> Locating...';
+      locationBtn.setAttribute('disabled', 'true');
+    }
+    
+    // Get position with multiple approaches
+    function getPositionWithFallback() {
+      // First, check if we have a stored position we can use
+      const storedLat = localStorage.getItem('last_location_lat');
+      const storedLng = localStorage.getItem('last_location_lng');
+      
+      if (storedLat && storedLng) {
+        console.log('Using previously stored location');
+        
+        // Use the stored location but also try to update it
+        const coords = {
+          lat: parseFloat(storedLat),
+          lng: parseFloat(storedLng)
+        };
+        
+        // Reset button state
+        if (locationBtn) {
+          locationBtn.innerHTML = '<i>◎</i> Use My Current Location';
+          locationBtn.removeAttribute('disabled');
+        }
+        
+        // Return the stored location immediately
+        resolve(coords);
+        
+        // But also try to get an updated location in the background
+        tryGeolocation().catch(() => {
+          // Silently fail - we already returned the stored location
+        });
+      } else {
+        // No stored location, need to get a new one
+        tryGeolocation().catch(error => {
+          // If geolocation fails, try IP-based location as fallback
+          console.log('Geolocation failed, using default location:', error);
+          if (locationBtn) {
+            locationBtn.innerHTML = '<i>◎</i> Use My Current Location';
+            locationBtn.removeAttribute('disabled');
+          }
+          reject(new Error('Could not determine your location. Please search for your city instead.'));
+        });
+      }
+    }
+    
+    // Try to get the position using the Geolocation API
+    function tryGeolocation(): Promise<{lat: number, lng: number}> {
+      return new Promise((resolve, reject) => {
+        getUserLocation()
+          .then(coords => {
+            console.log('Got coordinates from geolocation API:', coords);
+            
+            // Store for future use
+            localStorage.setItem('last_location_lat', coords.lat.toString());
+            localStorage.setItem('last_location_lng', coords.lng.toString());
+            
+            // Reset button state
+            if (locationBtn) {
+              locationBtn.innerHTML = '<i>◎</i> Use My Current Location';
+              locationBtn.removeAttribute('disabled');
+            }
+            
+            resolve(coords);
+          })
+          .catch(error => {
+            console.error('Geolocation error details:', error);
+            
+            // Reset button state
+            if (locationBtn) {
+              locationBtn.innerHTML = '<i>◎</i> Use My Current Location';
+              locationBtn.removeAttribute('disabled');
+            }
+            
+            // Extract error message
+            const errorMessage = error.customMessage || 
+                                (error.message || 'Could not determine your location. Please select a city manually.');
+            reject(new Error(errorMessage));
+          });
+      });
+    }
+    
+    // Start the location process directly, no need to load cities first
+    getPositionWithFallback();
+  });
+}
+
+// Handle city search
+function handleCitySearch(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const query = input.value.trim();
+  
+  // Clear previous results first
+  searchResults = [];
+  
+  // Show loading indicator
+  const resultsContainer = document.getElementById('city-results');
+  if (resultsContainer) {
+    resultsContainer.innerHTML = '<div class="loading-results">Searching...</div>';
+  }
+  
+  if (query.length >= 2) {
+    // Use Nominatim API instead of local search
+    searchCitiesWithNominatim(query, 5)
+      .then(cities => {
+        searchResults = cities;
+        renderSearchResults();
+      })
+      .catch(error => {
+        console.error('Error searching cities:', error);
+        
+        // Fallback to local search if Nominatim fails
+        if (allCities.length > 0) {
+          console.log('Falling back to local city search');
+          searchResults = searchCities(query, allCities, 5);
+        }
+        
+        renderSearchResults();
+      });
+  } else {
+    renderSearchResults();
+  }
+}
+
+// Render search results
+function renderSearchResults() {
+  const resultsContainer = document.getElementById('city-results');
+  if (!resultsContainer) return;
+  
+  if (searchResults.length === 0) {
+    resultsContainer.innerHTML = '<div class="no-results">No cities found. Try a different search term.</div>';
+    return;
+  }
+  
+  let html = '';
+  searchResults.forEach(city => {
+    html += `
+      <div class="city-item" data-lat="${city.lat}" data-lng="${city.lng}" data-city="${city.city}" data-country="${city.country}">
+        <div class="city-name">${city.city}</div>
+        <div class="city-country">${city.country}</div>
+      </div>
+    `;
+  });
+  
+  resultsContainer.innerHTML = html;
+  
+  // Add click handlers to city items
+  document.querySelectorAll('.city-item').forEach(item => {
+    item.addEventListener('click', handleCitySelection);
+  });
+}
+
+// Handle city selection
+function handleCitySelection(event: Event) {
+  const cityElement = event.currentTarget as HTMLElement;
+  const lat = parseFloat(cityElement.getAttribute('data-lat') || '0');
+  const lng = parseFloat(cityElement.getAttribute('data-lng') || '0');
+  const cityName = cityElement.getAttribute('data-city') || '';
+  const countryName = cityElement.getAttribute('data-country') || '';
+  
+  if (lat && lng) {
+    updateLocationAndPrayerTimes(lat, lng, cityName, countryName);
+    closeCitySelectionModal();
+  }
+}
+
+// Add current time and countdown update function
+function updateTimeAndCountdown() {
+  // Update current time
+  const clockElement = document.getElementById('current-time');
+  if (clockElement) {
+    clockElement.textContent = moment().tz(currentTimezone).format("h:mm A");
+  }
+  
+  // Update countdown
+  const countdownElement = document.getElementById('next-prayer-countdown');
+  if (countdownElement) {
+    const countdown = getTimeRemaining(nextPrayerTime);
+    countdownElement.textContent = countdown;
+    
+    // Check if countdown has reached zero
+    if (countdown === "Now" && !athanPlayed) {
+      // Play the athan
+      playAthan();
+      athanPlayed = true;
+      
+      // Prayer time has arrived - update to the next prayer after a delay
+      setTimeout(() => {
+        nextPrayerInfo = getNextPrayer();
+        nextPrayerTime = nextPrayerInfo.time;
+        athanPlayed = false; // Reset for next prayer
+        
+        // Update the prayer indicator in the table
+        currentPrayerValue = prayerTimes.currentPrayer();
+        
+        // Update the next prayer name display and regenerate HTML to refresh the UI
+        generateHTML();
+        
+        const nextPrayerNameElement = document.getElementById('next-prayer-name');
+        if (nextPrayerNameElement) {
+          nextPrayerNameElement.textContent = nextPrayerInfo.name;
+        }
+      }, 5000); // Update after 5 seconds instead of 1 minute
+    }
+  }
+  
+  // Continue updating
+  setTimeout(updateTimeAndCountdown, 1000);
+}
+
+// Determine the current prayer row for highlighting
+function isCurrentPrayer(prayer: Prayer): boolean {
+  return currentPrayerValue === prayer;
+}
+
+// Function to generate the settings modal HTML
+function generateSettingsModal() {
+  // Helper function to generate options for select elements
+  function generateOptions(optionsObj: Record<string, string>, currentValue: string): string {
+    let optionsHTML = '';
+    for (const key in optionsObj) {
+      if (Object.prototype.hasOwnProperty.call(optionsObj, key)) {
+        const value = optionsObj[key];
+        optionsHTML += `<option value="${value}" ${currentValue === value ? 'selected' : ''}>${value}</option>`;
+      }
+    }
+    return optionsHTML;
+  }
+  
+  // Get all available athan sounds (default + custom)
+  const allAthanSounds = [...athanSounds, ...customAthanSounds];
+  
+  const modalHTML = `
+    <div id="settings-modal" class="modal">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2>Settings</h2>
+          <button id="close-settings-modal" class="close-button">&times;</button>
+        </div>
+        <div class="modal-body">
+          <!-- Athan Settings Section -->
+          <div class="settings-section">
+            <h3>Athan Settings</h3>
+            <div class="setting-item">
+              <label for="athan-select">Athan Sound:</label>
+              <div class="setting-controls">
+                <select id="athan-select" class="settings-select">
+                  ${allAthanSounds.map(sound => 
+                    `<option value="${sound.elementId}" ${getSelectedAthan() === sound.elementId ? 'selected' : ''}>${sound.name}${sound.isCustom ? ' (Custom)' : ''}</option>`
+                  ).join('')}
+                </select>
+                <button id="listen-athan-btn" class="action-btn" title="Listen to selected athan">
+                  <i>▶️</i>
+                </button>
+                <button id="stop-athan-btn" class="action-btn" title="Stop athan playback">
+                  <i>⏹️</i>
+                </button>
+              </div>
+            </div>
+          </div>
+          
+          <!-- Custom Athan Upload Section -->
+          <div class="settings-section">
+            <h3>Add Custom Athan</h3>
+            <div class="custom-athan-form">
+              <div class="setting-item">
+                <label for="custom-athan-name">Name:</label>
+                <input type="text" id="custom-athan-name" class="settings-input" placeholder="Enter a name for your athan" style="width: 100%">
+              </div>
+              <div class="setting-item">
+                <label for="custom-athan-file">MP3 File:</label>
+                <input type="file" id="custom-athan-file" accept="audio/mpeg" class="settings-file-input">
+              </div>
+              <button id="upload-athan-btn" class="settings-btn-save">Upload Custom Athan</button>
+            </div>
+            
+            <!-- Custom Athan List -->
+            ${customAthanSounds.length > 0 ? `
+              <div class="custom-athan-list">
+                <h4>Your Custom Athans</h4>
+                <ul class="athan-list">
+                  ${customAthanSounds.map(sound => `
+                    <li class="athan-list-item">
+                      <span>${sound.name}</span>
+                      <div class="athan-actions">
+                        <button class="action-btn preview-athan-btn" data-id="${sound.elementId}" title="Preview">▶️</button>
+                        <button class="action-btn delete-athan-btn" data-id="${sound.elementId}" title="Delete">🗑️</button>
+                      </div>
+                    </li>
+                  `).join('')}
+                </ul>
+              </div>
+            ` : ''}
+          </div>
+          
+          <!-- Prayer Calculation Settings Section -->
+          <div class="settings-section">
+            <h3>Calculation Method</h3>
+            <div class="setting-item">
+              <label for="calculation-method">Method:</label>
+              <select id="calculation-method" class="settings-select">
+                ${generateOptions(CALCULATION_METHODS, prayerSettings.calculationMethod)}
+              </select>
+            </div>
+            
+            <div class="setting-item">
+              <label for="asr-method">Asr Calculation:</label>
+              <select id="asr-method" class="settings-select">
+                ${generateOptions(ASR_METHODS, prayerSettings.asrMethod)}
+              </select>
+            </div>
+            
+            <div class="setting-item">
+              <label for="high-latitude-method">High Latitude Method:</label>
+              <select id="high-latitude-method" class="settings-select">
+                ${generateOptions(HIGH_LATITUDE_METHODS, prayerSettings.highLatitudeMethod)}
+              </select>
+            </div>
+          </div>
+          
+          <!-- Custom Angles Section (only visible when Custom method is selected) -->
+          <div id="custom-angles-section" class="settings-section" style="display: ${prayerSettings.calculationMethod === CALCULATION_METHODS.CUSTOM ? 'block' : 'none'}">
+            <h3>Custom Angles</h3>
+            <div class="setting-item">
+              <label for="fajr-angle">Fajr Angle:</label>
+              <input type="number" id="fajr-angle" class="settings-input" min="0" max="30" step="0.5" value="${prayerSettings.angles.fajr}">
+            </div>
+            <div class="setting-item">
+              <label for="isha-angle">Isha Angle:</label>
+              <input type="number" id="isha-angle" class="settings-input" min="0" max="30" step="0.5" value="${prayerSettings.angles.isha}">
+            </div>
+          </div>
+          
+          <!-- Time Adjustments Section -->
+          <div class="settings-section">
+            <h3>Time Adjustments (minutes)</h3>
+            <div class="setting-item">
+              <label for="fajr-adjustment">Fajr:</label>
+              <input type="number" id="fajr-adjustment" class="settings-input" min="-60" max="60" value="${prayerSettings.adjustments.fajr}">
+            </div>
+            <div class="setting-item">
+              <label for="sunrise-adjustment">Sunrise:</label>
+              <input type="number" id="sunrise-adjustment" class="settings-input" min="-60" max="60" value="${prayerSettings.adjustments.sunrise}">
+            </div>
+            <div class="setting-item">
+              <label for="dhuhr-adjustment">Dhuhr:</label>
+              <input type="number" id="dhuhr-adjustment" class="settings-input" min="-60" max="60" value="${prayerSettings.adjustments.dhuhr}">
+            </div>
+            <div class="setting-item">
+              <label for="asr-adjustment">Asr:</label>
+              <input type="number" id="asr-adjustment" class="settings-input" min="-60" max="60" value="${prayerSettings.adjustments.asr}">
+            </div>
+            <div class="setting-item">
+              <label for="maghrib-adjustment">Maghrib:</label>
+              <input type="number" id="maghrib-adjustment" class="settings-input" min="-60" max="60" value="${prayerSettings.adjustments.maghrib}">
+            </div>
+            <div class="setting-item">
+              <label for="isha-adjustment">Isha:</label>
+              <input type="number" id="isha-adjustment" class="settings-input" min="-60" max="60" value="${prayerSettings.adjustments.isha}">
+            </div>
+          </div>
+          
+          <!-- Hijri Date Settings Section -->
+          <div class="settings-section">
+            <h3>Hijri Date Settings</h3>
+            <div class="setting-item">
+              <label for="hijri-date-adjustment">Date Adjustment (days):</label>
+              <input type="number" id="hijri-date-adjustment" class="settings-input" min="-3" max="3" value="${prayerSettings.hijriDateAdjustment}">
+              <p class="setting-description">Adjust Hijri date by ±3 days to match your local moon sighting. Using standard Hijri calendar calculation.</p>
+            </div>
+          </div>
+          
+          <!-- Save Button -->
+          <div class="settings-section">
+            <button id="save-settings-btn" class="settings-btn-save">Save Settings</button>
+            <button id="reset-settings-btn" class="settings-btn-reset">Reset to Defaults</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+  
+  // Append to body if not already present
+  if (!document.getElementById('settings-modal')) {
+    const modalContainer = document.createElement('div');
+    modalContainer.innerHTML = modalHTML;
+    document.body.appendChild(modalContainer);
+  } else {
+    // Update existing modal
+    const existingModal = document.getElementById('settings-modal');
+    if (existingModal) {
+      // Keep the modal open if it was already open
+      const wasActive = existingModal.classList.contains('active');
+      
+      // Update the content
+      const parentElement = existingModal.parentElement;
+      if (parentElement) {
+        parentElement.removeChild(existingModal);
+        const newModal = document.createElement('div');
+        newModal.innerHTML = modalHTML;
+        const newModalContent = newModal.firstElementChild;
+        if (newModalContent) {
+          parentElement.appendChild(newModalContent);
+          
+          // Restore active state if needed
+          if (wasActive) {
+            document.getElementById('settings-modal')?.classList.add('active');
+          }
+          
+          // Reattach event listeners
+          setupSettingsEventListeners();
+        }
+      }
+    }
+  }
+  
+  // Setup event listeners for the athan settings
+  setupSettingsEventListeners();
+}
+
+// Function to set up event listeners for the settings modal
+function setupSettingsEventListeners() {
+  // Listen button
+  document.getElementById('listen-athan-btn')?.addEventListener('click', () => {
+    const select = document.getElementById('athan-select') as HTMLSelectElement;
+    if (select) {
+      playAthanById(select.value);
+    }
+  });
+  
+  // Stop button
+  document.getElementById('stop-athan-btn')?.addEventListener('click', stopAthanPlayback);
+  
+  // Upload button
+  document.getElementById('upload-athan-btn')?.addEventListener('click', handleCustomAthanUpload);
+  
+  // Preview buttons for custom athans
+  document.querySelectorAll('.preview-athan-btn').forEach(button => {
+    button.addEventListener('click', (event) => {
+      const target = event.currentTarget as HTMLElement;
+      const athanId = target.getAttribute('data-id');
+      if (athanId) {
+        playAthanById(athanId);
+      }
+    });
+  });
+  
+  // Delete buttons for custom athans
+  document.querySelectorAll('.delete-athan-btn').forEach(button => {
+    button.addEventListener('click', (event) => {
+      const target = event.currentTarget as HTMLElement;
+      const athanId = target.getAttribute('data-id');
+      if (athanId) {
+        if (confirm('Are you sure you want to delete this custom athan?')) {
+          deleteCustomAthan(athanId);
+        }
+      }
+    });
+  });
+}
+
+// Handle custom athan upload
+async function handleCustomAthanUpload() {
+  const nameInput = document.getElementById('custom-athan-name') as HTMLInputElement;
+  const fileInput = document.getElementById('custom-athan-file') as HTMLInputElement;
+  
+  if (!nameInput || !fileInput) {
+    console.error('Custom athan form elements not found');
+    return;
+  }
+  
+  const name = nameInput.value.trim();
+  const file = fileInput.files?.[0];
+  
+  // Validate input
+  if (!name) {
+    showToast('Please enter a name for your athan');
+    return;
+  }
+  
+  if (!file) {
+    showToast('Please select an MP3 file');
+    return;
+  }
+  
+  // Validate file type
+  if (file.type !== 'audio/mpeg') {
+    showToast('Only MP3 files are supported');
+    return;
+  }
+  
+  // Validate file size (max 5MB)
+  const maxSize = 5 * 1024 * 1024; // 5MB in bytes
+  if (file.size > maxSize) {
+    showToast('File size must be less than 5MB');
+    return;
+  }
+  
+  try {
+    // Show loading indicator
+    showToast('Uploading athan...');
+    
+    // Read the file as a data URL
+    const reader = new FileReader();
+    
+    reader.onload = async (event) => {
+      const fileData = event.target?.result as string;
+      
+      // Generate a unique ID for the athan
+      const elementId = `custom_athan_${Date.now()}`;
+      
+      // Save the athan to IndexedDB
+      const success = await saveCustomAthan(name, fileData, elementId);
+      
+      if (success) {
+        // Clear the form
+        nameInput.value = '';
+        fileInput.value = '';
+      }
+    };
+    
+    reader.onerror = () => {
+      console.error('Error reading file:', reader.error);
+      showToast('Error reading file');
+    };
+    
+    // Start reading the file
+    reader.readAsDataURL(file);
+  } catch (error) {
+    console.error('Error handling custom athan upload:', error);
+    showToast('Error uploading athan');
+  }
+}
+
+// Function to generate the HTML after initialization
+function generateHTML() {
+  // Make sure prayer times are initialized before using them
+  if (!prayerTimes || !tomorrowPrayerTimes || !nextPrayerInfo) {
+    console.error("Critical error: Prayer times not initialized before generating HTML");
+    // Create default prayer times
+    createDefaultPrayerTimes();
+  }
+
+  // Make sure nextPrayerInfo is defined before using it
+  if (!nextPrayerInfo) {
+    const defaultNext = new Date();
+    defaultNext.setHours(defaultNext.getHours() + 1);
+    nextPrayerInfo = { name: "Unknown", time: defaultNext };
+    nextPrayerTime = defaultNext;
+  }
+
+  // Safe formatting functions that handle undefined/null values
+  const safeFormatTime = (date: Date | undefined | null): string => {
+    if (!date) return "--:-- --";
+    try {
+      return moment(date).tz(currentTimezone).format("h:mm A");
+    } catch (error) {
+      return "--:-- --";
+    }
+  };
+
+  try {
+    document.getElementById("app")!.innerHTML = `
+    <div class="container">
+      <div id="connection-status" class="connection-status online-indicator" title="Online">●</div>
+      <div class="current-time">
+        <div class="time-display" id="current-time">${moment().tz(currentTimezone).format("h:mm A")}</div>
+        <div class="countdown-container">
+          <div class="countdown-label">Next Prayer: <span id="next-prayer-name">${nextPrayerInfo.name}</span></div>
+          <div class="countdown-display" id="next-prayer-countdown">${getTimeRemaining(nextPrayerTime)}</div>
+        </div>
+      </div>
+      
+      <div class="date-info">
+        <div class="date-display">${moment(new Date()).format("dddd, MMMM D, YYYY")}</div>
+        <div class="hijri-date">${hijriDate}</div>
+      </div>
+      
+      <div class="header-card">
+        <div class="location-info">
+          <div class="location-name" id="location-name">
+            ${currentCity}, ${currentCountry}
+            <button class="city-change-btn" id="change-location-btn" title="Change Location">
+              ◎
+            </button>
+          </div>
+          <div class="location-address">${prayerSettings.calculationMethod}</div>
+        </div>
+      </div>
+      
+      <div class="prayer-table-container">
+        <div class="prayer-table-wrapper">
+          <table class="prayer-table">
+            <thead>
+              <tr>
+                <th>Prayer</th>
+                <th>Begins</th>
+                <th>Tomorrow</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr class="${isCurrentPrayer(Prayer.Fajr) ? 'current-row' : ''}">
+                <td class="prayer-name">Fajr</td>
+                <td>${safeFormatTime(prayerTimes.fajr)}</td>
+                <td>${safeFormatTime(tomorrowPrayerTimes.fajr)}</td>
+              </tr>
+              <tr class="${isCurrentPrayer(Prayer.Sunrise) ? 'current-row' : ''}">
+                <td class="prayer-name">Sunrise</td>
+                <td>${safeFormatTime(prayerTimes.sunrise)}</td>
+                <td>${safeFormatTime(tomorrowPrayerTimes.sunrise)}</td>
+              </tr>
+              <tr class="${isCurrentPrayer(Prayer.Dhuhr) ? 'current-row' : ''}">
+                <td class="prayer-name">Dhuhr</td>
+                <td>${safeFormatTime(prayerTimes.dhuhr)}</td>
+                <td>${safeFormatTime(tomorrowPrayerTimes.dhuhr)}</td>
+              </tr>
+              <tr class="${isCurrentPrayer(Prayer.Asr) ? 'current-row' : ''}">
+                <td class="prayer-name">Asr</td>
+                <td>${safeFormatTime(prayerTimes.asr)}</td>
+                <td>${safeFormatTime(tomorrowPrayerTimes.asr)}</td>
+              </tr>
+              <tr class="${isCurrentPrayer(Prayer.Maghrib) ? 'current-row' : ''}">
+                <td class="prayer-name">Maghrib</td>
+                <td>${safeFormatTime(prayerTimes.maghrib)}</td>
+                <td>${safeFormatTime(tomorrowPrayerTimes.maghrib)}</td>
+              </tr>
+              <tr class="${isCurrentPrayer(Prayer.Isha) ? 'current-row' : ''}">
+                <td class="prayer-name">Isha</td>
+                <td>${safeFormatTime(prayerTimes.isha)}</td>
+                <td>${safeFormatTime(tomorrowPrayerTimes.isha)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      
+      <div class="additional-info-container">
+        <div class="info-card">
+          <div class="info-card-title">Middle of Night</div>
+          <div class="info-card-value middle-of-night-value">${safeFormatTime(sunnahTimes?.middleOfTheNight)}</div>
+        </div>
+        
+        <div class="info-card">
+          <div class="info-card-title">Last Third of Night</div>
+          <div class="info-card-value last-third-value">${safeFormatTime(sunnahTimes?.lastThirdOfTheNight)}</div>
+        </div>
+        
+        <div class="info-card">
+          <div class="info-card-title">Next Prayer</div>
+          <div class="info-card-value next-prayer-value">${nextPrayerInfo.name}</div>
+        </div>
+      </div>
+      
+      <div class="footer">
+        <div class="footer-content">
+          <div class="footer-text">
+            Prayer times for ${currentCity}, ${currentCountry} • ${prayerSettings.calculationMethod} • ${moment().format("YYYY")}
+          </div>
+          <button class="settings-btn" id="open-settings-btn" title="Settings">
+            ⚙️
+          </button>
+        </div>
+      </div>
+    </div>
+    
+    <!-- City Selection Modal -->
+    <div id="city-modal" class="modal-overlay">
+      <div class="modal-content">
+        <div class="modal-header">
+          <div class="modal-title">Choose Your Location</div>
+          <button class="modal-close" id="close-modal">&times;</button>
+        </div>
+        
+        <button class="location-btn" id="use-location-btn">
+          <i>◎</i> Use My Current Location
+        </button>
+        
+        <div class="search-container">
+          <input type="text" id="city-search" class="search-input" placeholder="Search for a city..." autocomplete="off">
+          <span class="search-icon">🔍</span>
+        </div>
+        
+        <div id="city-results" class="city-results">
+          <!-- Search results will be populated here -->
+        </div>
+      </div>
+    </div>
+    
+    <!-- Add audio elements for the athan sounds -->
+    ${athanSounds.map(sound => 
+      `<audio id="${sound.elementId}" preload="auto" src="${sound.file}"></audio>`
+    ).join('')}
+    `;
+    
+    // After generating the HTML, set up the event listeners directly
+    // This ensures they're always attached after HTML regeneration
+    setupEventListeners();
+    
+  } catch (error) {
+    console.error("Error generating HTML:", error);
+    document.getElementById("app")!.innerHTML = `
+      <div class="error-container">
+        <h2>Error loading prayer times</h2>
+        <p>There was a problem loading the prayer times. Please try refreshing the page.</p>
+        <button onclick="window.location.reload()">Refresh Page</button>
+      </div>
+    `;
+  }
+}
+
+// Function to setup all event listeners
+function setupEventListeners() {
+  console.log("Setting up event listeners");
+  
+  // Setup event listeners for city selection
+  document.getElementById('change-location-btn')?.addEventListener('click', showCitySelectionModal);
+  document.getElementById('close-city-modal')?.addEventListener('click', closeCitySelectionModal);
+  document.getElementById('close-modal')?.addEventListener('click', closeCitySelectionModal);
+  
+  // Setup event listeners for settings modal
+  const openSettingsBtn = document.getElementById('open-settings-btn');
+  console.log("Open settings button:", openSettingsBtn);
+  openSettingsBtn?.addEventListener('click', showSettingsModal);
+  
+  // The modal's internal button handlers (close, save, reset) are now attached
+  // in the attachModalEventListeners function called by showSettingsModal
+  
+  // Setup athan selection
+  document.getElementById('athan-select')?.addEventListener('change', changeAthan);
+  
+  // Setup settings specific event listeners
+  setupSettingsEventListeners();
+  
+  // Setup prayer calculation settings event listeners
+  document.getElementById('calculation-method')?.addEventListener('change', handleCalculationMethodChange);
+  document.getElementById('asr-method')?.addEventListener('change', handleAsrMethodChange);
+  document.getElementById('high-latitude-method')?.addEventListener('change', handleHighLatitudeMethodChange);
+  
+  // Setup adjustment inputs for real-time updates
+  setupAdjustmentInputs();
+  setupCustomAngleInputs();
+  setupHijriDateAdjustment();
+  
+  // Setup city search functionality
+  const citySearchInput = document.getElementById('city-search') as HTMLInputElement;
+  console.log("City search input:", citySearchInput);
+  if (citySearchInput) {
+    citySearchInput.addEventListener('input', handleCitySearch);
+    citySearchInput.addEventListener('focus', () => {
+      if (citySearchInput.value.length >= 2) {
+        // Re-trigger search when input gets focus
+        handleCitySearch({ target: citySearchInput } as unknown as Event);
+      }
+    });
+  }
+  
+  // Setup geolocation button
+  const useLocationBtn = document.getElementById('use-location-btn');
+  console.log("Use location button:", useLocationBtn);
+  useLocationBtn?.addEventListener('click', () => {
+    getUserLocationWrapper()
+      .then(coords => {
+        console.log('Using coordinates from geolocation:', coords);
+        
+        // Get city name from coordinates using Nominatim
+        getLocationDetailsFromCoordinates(coords.lat, coords.lng)
+          .then(details => {
+            if (details) {
+              console.log('Got location details:', details);
+              updateLocationAndPrayerTimes(coords.lat, coords.lng, details.city, details.country);
+            } else {
+              // If Nominatim fails, try to find the nearest city from our local data
+              if (allCities.length > 0) {
+                const nearestCity = findNearestCity(coords.lat, coords.lng, allCities);
+                if (nearestCity) {
+                  console.log('Using nearest city from local data:', nearestCity);
+                  updateLocationAndPrayerTimes(coords.lat, coords.lng, nearestCity.city, nearestCity.country);
+                } else {
+                  // Last resort: use the coordinates without city name
+                  updateLocationAndPrayerTimes(coords.lat, coords.lng);
+                }
+              } else {
+                // Last resort: use the coordinates without city name
+                updateLocationAndPrayerTimes(coords.lat, coords.lng);
+              }
+            }
+            
+            closeCitySelectionModal();
+          })
+          .catch(error => {
+            console.error('Error getting location details:', error);
+            // Use coordinates directly as fallback
+            updateLocationAndPrayerTimes(coords.lat, coords.lng);
+            closeCitySelectionModal();
+          });
+      })
+      .catch(error => {
+        console.error('Error getting user location:', error);
+        alert(error.message || 'Could not determine your location. Please search for your city instead.');
+      });
+  });
+  
+  // Setup event delegation for city results
+  const cityResults = document.getElementById('city-results');
+  console.log("City results container:", cityResults);
+  cityResults?.addEventListener('click', (event) => {
+    const target = event.target as HTMLElement;
+    const cityElement = target.closest('.city-item') as HTMLElement;
+    
+    if (!cityElement) return;
+    
+    const lat = parseFloat(cityElement.getAttribute('data-lat') || '0');
+    const lng = parseFloat(cityElement.getAttribute('data-lng') || '0');
+    const cityName = cityElement.getAttribute('data-city') || '';
+    const countryName = cityElement.getAttribute('data-country') || '';
+    
+    if (lat && lng) {
+      updateLocationAndPrayerTimes(lat, lng, cityName, countryName);
+      closeCitySelectionModal();
+    }
+  });
+}
+
+// Setup UI components and event listeners
+function setupUIComponents() {
+  // First generate the HTML for the main app
+  generateHTML();
+  
+  // Generate the modals
+  generateCitySelectionModal();
+  generateSettingsModal();
+  
+  // No need to setup listeners here as they're now handled in setupEventListeners()
+  // which is called directly from generateHTML()
+}
+
+// Add these CSS classes for the footer settings button and modal
+document.head.insertAdjacentHTML('beforeend', `
+<style>
+.footer {
+  position: relative;
+  padding: 10px 0;
+  margin-top: 20px;
+  border-top: 1px solid #e5e5e5;
+}
+
+.footer-content {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0 15px;
+  width: 100%;
+}
+
+.footer-text {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.settings-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 1.2rem;
+  padding: 5px;
+  margin-left: 10px;
+  color: #555;
+  transition: transform 0.2s;
+  flex-shrink: 0;
+}
+
+.settings-btn:hover {
+  transform: rotate(45deg);
+}
+
+/* Modal Styles */
+.modal {
+  display: none;
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-color: rgba(0, 0, 0, 0.5);
+  z-index: 1000;
+  overflow-y: auto;
+}
+
+.modal.active {
+  display: block;
+}
+
+.modal-content {
+  background-color: #fff;
+  margin: 10% auto;
+  padding: 20px;
+  border-radius: 8px;
+  width: 90%;
+  max-width: 600px;
+  position: relative;
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+}
+
+.close-button {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  font-size: 24px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  width: 30px;
+  height: 30px;
+}
+
+.close-button:hover {
+  color: #777;
+}
+
+/* Setting preview styles */
+.setting-description {
+  font-size: 0.8rem;
+  color: #666;
+  margin-top: 4px;
+  margin-bottom: 8px;
+}
+
+.setting-preview {
+  font-size: 0.9rem;
+  color: #3a87ad;
+  background-color: #d9edf7;
+  border: 1px solid #bce8f1;
+  border-radius: 4px;
+  padding: 4px 8px;
+  margin-top: 6px;
+  display: inline-block;
+}
+
+.settings-btn-save-highlight {
+  background-color: #4caf50;
+  color: white;
+  animation: pulse 1.5s infinite;
+}
+
+@keyframes pulse {
+  0% {
+    opacity: 0.8;
+  }
+  50% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0.8;
+  }
+}
+</style>
+`);
+
+// Setup connection status indicators
+function setupConnectionStatus() {
+  const updateOnlineStatus = () => {
+    const statusElement = document.getElementById('connection-status');
+    if (statusElement) {
+      if (navigator.onLine) {
+        statusElement.classList.remove('offline-indicator');
+        statusElement.classList.add('online-indicator');
+        statusElement.setAttribute('title', 'Online');
+      } else {
+        statusElement.classList.remove('online-indicator');
+        statusElement.classList.add('offline-indicator');
+        statusElement.setAttribute('title', 'Offline - using cached data');
+      }
+    }
+  };
+  
+  // Add event listeners for online/offline events
+  window.addEventListener('online', updateOnlineStatus);
+  window.addEventListener('offline', updateOnlineStatus);
+  
+  // Initialize status
+  updateOnlineStatus();
+}
+
+// Main initialization
+function init() {
+  // Register service worker first
+  registerServiceWorker();
+  
+  // Initialize storage for athans and other preferences
+  initializeStorage();
+  
+  // Initialize location and prayer times
+  initializeLocation();
+  
+  // Setup UI after a short delay to ensure DOM is ready
+  setTimeout(() => {
+    setupUIComponents();
+    
+    // Start the clock and countdown
+    updateTimeAndCountdown();
+    
+    // Setup event listeners for connection status updates
+    setupConnectionStatus();
+  }, 100);
+}
+
+// Main function to run on page load
+document.addEventListener('DOMContentLoaded', () => {
+  console.log('Prayer times app starting up...');
+  init();
+});
+
+// Search for cities using Nominatim API
+async function searchCitiesWithNominatim(query: string, limit = 5): Promise<City[]> {
+  if (!query || query.length < 2) return [];
+  
+  try {
+    // Wait for rate limiter
+    await nominatimRateLimiter.waitForNext();
+    
+    // URL encode the query parameter
+    const encodedQuery = encodeURIComponent(query);
+    
+    // Construct the Nominatim API URL with proper parameters
+    const apiUrl = `https://nominatim.openstreetmap.org/search?q=${encodedQuery}&format=json&addressdetails=1&limit=${limit}`;
+    
+    // Add a user-agent header as recommended by Nominatim's usage policy
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
+    
+    const response = await fetch(apiUrl, {
+      headers: {
+        'User-Agent': 'PrayerTimesApp/1.0'
+      },
+      signal: controller.signal
+    });
+    
+    clearTimeout(timeoutId);
+    
+    if (!response.ok) {
+      console.error(`Nominatim API error: ${response.status} ${response.statusText}`);
+      throw new Error('Failed to fetch location data');
+    }
+    
+    const data = await response.json();
+    
+    // Handle empty response
+    if (!Array.isArray(data)) {
+      console.warn('Unexpected response format from Nominatim API:', data);
+      return [];
+    }
+    
+    if (data.length === 0) {
+      console.log('No results found for query:', query);
+      return [];
+    }
+    
+    // Convert Nominatim results to our City format with validation
+    const cities: City[] = data
+      .filter(item => item && typeof item.lat === 'string' && typeof item.lon === 'string')
+      .map((item: any) => {
+        // Extract city and country from address details when available
+        let cityName = item.name || 'Unknown Location';
+        let countryName = 'Unknown';
+        
+        if (item.address) {
+          // Try to get the most specific locality name
+          cityName = item.address.city || 
+                   item.address.town || 
+                   item.address.village || 
+                   item.address.hamlet || 
+                   item.address.suburb ||
+                   item.address.county ||
+                   item.name ||
+                   'Unknown Location';
+                   
+          countryName = item.address.country || 'Unknown';
+        }
+        
+        // Validate coordinates
+        const lat = parseFloat(item.lat);
+        const lng = parseFloat(item.lon);
+        
+        if (isNaN(lat) || isNaN(lng)) {
+          console.warn('Invalid coordinates for:', cityName);
+          return null;
+        }
+        
+        return {
+          city: cityName,
+          lat: lat,
+          lng: lng,
+          country: countryName,
+          population: 0 // Nominatim doesn't provide population data
+        };
+      })
+      .filter(city => city !== null) as City[]; // Remove null entries
+    
+    return cities;
+  } catch (error) {
+    // Handle fetch abort errors separately
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      console.error('Nominatim API request timed out');
+      throw new Error('Location search timed out. Please try again.');
+    }
+    
+    console.error('Error searching with Nominatim:', error);
+    throw error; // Re-throw to allow caller to fallback to local search
+  }
+}
+
+// Get location details from coordinates using Nominatim reverse geocoding
+async function getLocationDetailsFromCoordinates(lat: number, lng: number): Promise<{city: string, country: string} | null> {
+  try {
+    // Validate coordinates
+    if (isNaN(lat) || isNaN(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+      console.error('Invalid coordinates:', lat, lng);
+      return null;
+    }
+    
+    // Wait for rate limiter
+    await nominatimRateLimiter.waitForNext();
+    
+    // Construct the Nominatim reverse geocoding API URL
+    const apiUrl = `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&addressdetails=1`;
+    
+    // Add timeout for fetch
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
+    
+    // Add a user-agent header as recommended by Nominatim's usage policy
+    const response = await fetch(apiUrl, {
+      headers: {
+        'User-Agent': 'PrayerTimesApp/1.0'
+      },
+      signal: controller.signal
+    });
+    
+    clearTimeout(timeoutId);
+    
+    if (!response.ok) {
+      console.error(`Nominatim API error: ${response.status} ${response.statusText}`);
+      throw new Error('Failed to fetch location details');
+    }
+    
+    const data = await response.json();
+    
+    if (!data || !data.address) {
+      console.warn('No address data found for coordinates:', lat, lng);
+      return null;
+    }
+    
+    // Extract city and country from address details
+    const cityName = data.address.city || 
+                   data.address.town || 
+                   data.address.village || 
+                   data.address.hamlet || 
+                   data.address.suburb ||
+                   data.address.county ||
+                   'Unknown Location';
+                   
+    const countryName = data.address.country || 'Unknown';
+    
+    return {
+      city: cityName,
+      country: countryName
+    };
+  } catch (error) {
+    // Handle fetch abort errors separately
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      console.error('Nominatim API request timed out');
+      return null;
+    }
+    
+    console.error('Error getting location details:', error);
+    return null;
+  }
+}
+
+// Function to save prayer settings to localStorage
+function savePrayerSettings() {
+  localStorage.setItem('prayer_settings', JSON.stringify(prayerSettings));
+}
+
+// Function to load prayer settings from localStorage
+function loadPrayerSettings() {
+  const savedSettings = localStorage.getItem('prayer_settings');
+  
+  try {
+    if (savedSettings) {
+      const parsedSettings = JSON.parse(savedSettings);
+      
+      // Validate that we have the correct structure before assigning
+      if (parsedSettings && 
+          typeof parsedSettings === 'object' &&
+          parsedSettings.calculationMethod && 
+          parsedSettings.asrMethod && 
+          parsedSettings.highLatitudeMethod &&
+          parsedSettings.adjustments &&
+          parsedSettings.angles) {
+        
+        prayerSettings = parsedSettings;
+        console.log('Loaded prayer settings from storage:', prayerSettings);
+      } else {
+        console.warn('Saved prayer settings are invalid, using defaults');
+        resetToDefaultSettings();
+      }
+    } else {
+      console.log('No saved prayer settings found, using defaults');
+      resetToDefaultSettings();
+    }
+  } catch (error) {
+    console.error('Error parsing saved prayer settings:', error);
+    resetToDefaultSettings();
+  }
+}
+
+// Function to reset settings to defaults
+function resetToDefaultSettings() {
+  prayerSettings = {
+    calculationMethod: CALCULATION_METHODS.MOONSIGHTING,
+    asrMethod: ASR_METHODS.STANDARD,
+    highLatitudeMethod: HIGH_LATITUDE_METHODS.NONE,
+    adjustments: {
+      fajr: 0,
+      sunrise: 0,
+      dhuhr: 0,
+      asr: 0,
+      maghrib: 0,
+      isha: 0
+    },
+    angles: {
+      fajr: 18,
+      isha: 18
+    },
+    hijriDateAdjustment: 0
+  };
+}
+
+// Function to handle calculation method change
+function handleCalculationMethodChange(event: Event) {
+  const select = event.target as HTMLSelectElement;
+  prayerSettings.calculationMethod = select.value;
+  
+  // Show/hide custom angles section based on selection
+  const customAnglesSection = document.getElementById('custom-angles-section');
+  if (customAnglesSection) {
+    customAnglesSection.style.display = 
+      prayerSettings.calculationMethod === CALCULATION_METHODS.CUSTOM ? 'block' : 'none';
+  }
+  
+  // Apply the change immediately if possible
+  try {
+    // Try to apply new settings
+    initializeAppWithSettings();
+    
+    // Give visual feedback by updating the times display
+    previewPrayerTimes();
+  } catch (error) {
+    console.error("Error previewing calculation method change:", error);
+  }
+}
+
+// Function to handle Asr method change
+function handleAsrMethodChange(event: Event) {
+  const select = event.target as HTMLSelectElement;
+  prayerSettings.asrMethod = select.value;
+  
+  // Preview changes
+  try {
+    initializeAppWithSettings();
+    previewPrayerTimes();
+  } catch (error) {
+    console.error("Error previewing Asr method change:", error);
+  }
+}
+
+// Function to handle high latitude method change
+function handleHighLatitudeMethodChange(event: Event) {
+  const select = event.target as HTMLSelectElement;
+  prayerSettings.highLatitudeMethod = select.value;
+  
+  // Preview changes
+  try {
+    initializeAppWithSettings();
+    previewPrayerTimes();
+  } catch (error) {
+    console.error("Error previewing high latitude method change:", error);
+  }
+}
+
+// Function to provide a preview of prayer times in the settings modal
+function previewPrayerTimes() {
+  // Find the save button and update its text to indicate changes
+  const saveButton = document.getElementById('save-settings-btn');
+  if (saveButton) {
+    saveButton.textContent = "Save Changes";
+    saveButton.classList.add('settings-btn-save-highlight');
+  }
+  
+  // You could also show the updated times in the settings modal
+  // by adding prayer time preview elements to the modal
+}
+
+// Update settings from UI inputs
+function updatePrayerSettingsFromUI() {
+  console.log("Updating prayer settings from UI");
+  
+  try {
+    // Store the previous settings for comparison
+    const previousSettings = { ...prayerSettings };
+    
+    // Save the selected athan sound first (this is separate from prayer settings)
+    const athanSelect = document.getElementById('athan-select') as HTMLSelectElement;
+    if (athanSelect) {
+      const selectedAthanId = athanSelect.value;
+      const currentAthanId = getSelectedAthan();
+      
+      if (selectedAthanId !== currentAthanId) {
+        console.log(`Changing athan from ${currentAthanId} to ${selectedAthanId}`);
+        localStorage.setItem('selectedAthan', selectedAthanId);
+      }
+    }
+    
+    // Create a new settings object from the UI
+    const newSettings = {
+      calculationMethod: (document.getElementById('calculation-method') as HTMLSelectElement)?.value || prayerSettings.calculationMethod,
+      asrMethod: (document.getElementById('asr-method') as HTMLSelectElement)?.value || prayerSettings.asrMethod,
+      highLatitudeMethod: (document.getElementById('high-latitude-method') as HTMLSelectElement)?.value || prayerSettings.highLatitudeMethod,
+      angles: {
+        fajr: parseFloat((document.getElementById('fajr-angle') as HTMLInputElement)?.value || prayerSettings.angles.fajr.toString()),
+        isha: parseFloat((document.getElementById('isha-angle') as HTMLInputElement)?.value || prayerSettings.angles.isha.toString())
+      },
+      adjustments: {
+        fajr: parseInt((document.getElementById('fajr-adjustment') as HTMLInputElement)?.value || prayerSettings.adjustments.fajr.toString(), 10),
+        sunrise: parseInt((document.getElementById('sunrise-adjustment') as HTMLInputElement)?.value || prayerSettings.adjustments.sunrise.toString(), 10),
+        dhuhr: parseInt((document.getElementById('dhuhr-adjustment') as HTMLInputElement)?.value || prayerSettings.adjustments.dhuhr.toString(), 10),
+        asr: parseInt((document.getElementById('asr-adjustment') as HTMLInputElement)?.value || prayerSettings.adjustments.asr.toString(), 10),
+        maghrib: parseInt((document.getElementById('maghrib-adjustment') as HTMLInputElement)?.value || prayerSettings.adjustments.maghrib.toString(), 10),
+        isha: parseInt((document.getElementById('isha-adjustment') as HTMLInputElement)?.value || prayerSettings.adjustments.isha.toString(), 10)
+      },
+      hijriDateAdjustment: parseInt((document.getElementById('hijri-date-adjustment') as HTMLInputElement)?.value || prayerSettings.hijriDateAdjustment.toString(), 10) || 0
+    };
+    
+    // Check if any settings have actually changed compared to the ORIGINAL settings
+    const settingsChanged = 
+      newSettings.calculationMethod !== originalPrayerSettings.calculationMethod ||
+      newSettings.asrMethod !== originalPrayerSettings.asrMethod ||
+      newSettings.highLatitudeMethod !== originalPrayerSettings.highLatitudeMethod ||
+      newSettings.angles.fajr !== originalPrayerSettings.angles.fajr ||
+      newSettings.angles.isha !== originalPrayerSettings.angles.isha ||
+      newSettings.adjustments.fajr !== originalPrayerSettings.adjustments.fajr ||
+      newSettings.adjustments.sunrise !== originalPrayerSettings.adjustments.sunrise ||
+      newSettings.adjustments.dhuhr !== originalPrayerSettings.adjustments.dhuhr ||
+      newSettings.adjustments.asr !== originalPrayerSettings.adjustments.asr ||
+      newSettings.adjustments.maghrib !== originalPrayerSettings.adjustments.maghrib ||
+      newSettings.adjustments.isha !== originalPrayerSettings.adjustments.isha ||
+      newSettings.hijriDateAdjustment !== originalPrayerSettings.hijriDateAdjustment;
+    
+    // Also check if athan has changed
+    const athanChanged = athanSelect && athanSelect.value !== getSelectedAthan();
+    
+    console.log("Settings changed:", settingsChanged);
+    console.log("Athan changed:", athanChanged);
+    
+    // If no settings have changed and athan hasn't changed, just close the modal and show a message
+    if (!settingsChanged && !athanChanged) {
+      console.log("No settings or athan changes detected");
+      showToast("No changes made to settings");
+      closeSettingsModal();
+      return;
+    }
+    
+    console.log("Applying new settings:", newSettings);
+    
+    // Apply the new settings
+    prayerSettings.calculationMethod = newSettings.calculationMethod;
+    prayerSettings.asrMethod = newSettings.asrMethod;
+    prayerSettings.highLatitudeMethod = newSettings.highLatitudeMethod;
+    prayerSettings.angles = newSettings.angles;
+    prayerSettings.adjustments = newSettings.adjustments;
+    prayerSettings.hijriDateAdjustment = newSettings.hijriDateAdjustment;
+    
+    // Save settings to localStorage first
+    savePrayerSettings();
+    
+    try {
+      // Update prayer times with new settings
+      initializeAppWithSettings();
+      
+      // Recalculate Hijri date with new adjustment
+      hijriDate = getHijriDate();
+      
+      // Rebuild the UI to reflect the changes
+      generateHTML();
+      
+      // Show confirmation message
+      showToast("Settings saved successfully!");
+      
+      // Close the settings modal
+      closeSettingsModal();
+    } catch (error) {
+      console.error("Error applying settings:", error);
+      // Revert to previous settings
+      prayerSettings = previousSettings;
+      savePrayerSettings();
+      alert("Error applying settings. Please try different values.");
+    }
+  } catch (error) {
+    console.error("Error saving settings:", error);
+    alert("There was an error saving your settings. Please try again.");
+  }
+}
+
+// Show a temporary toast message
+function showToast(message: string) {
+  // Create toast element if it doesn't exist
+  let toast = document.getElementById('toast-message');
+  if (!toast) {
+    toast = document.createElement('div');
+    toast.id = 'toast-message';
+    toast.className = 'toast-message';
+    document.body.appendChild(toast);
+  }
+  
+  // Set message and show
+  toast.textContent = message;
+  toast.classList.add('show');
+  
+  // Hide after 3 seconds
+  setTimeout(() => {
+    toast.classList.remove('show');
+  }, 3000);
+}
+
+// Function to reset settings to defaults when user clicks the reset button
+function resetPrayerSettings() {
+  // Reset to defaults
+  resetToDefaultSettings();
+  
+  // Save to localStorage
+  savePrayerSettings();
+  
+  // Update prayer times and UI
+  initializeAppWithSettings();
+  generateHTML(); // This now calls setupEventListeners internally
+  
+  // Show confirmation
+  showToast("Settings reset to defaults");
+  
+  // Regenerate settings modal
+  generateSettingsModal();
+  
+  // Reattach event listeners specifically for the modal
+  attachModalEventListeners();
+}
+
+// Setup adjustment inputs to update in real-time
+function setupAdjustmentInputs() {
+  const adjustmentInputs = [
+    'fajr-adjustment',
+    'sunrise-adjustment',
+    'dhuhr-adjustment',
+    'asr-adjustment',
+    'maghrib-adjustment',
+    'isha-adjustment'
+  ];
+  
+  adjustmentInputs.forEach(id => {
+    const input = document.getElementById(id) as HTMLInputElement;
+    if (input) {
+      input.addEventListener('input', handleAdjustmentChange);
+    }
+  });
+}
+
+// Handle changes to time adjustments
+function handleAdjustmentChange(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const prayerName = input.id.split('-')[0]; // e.g., "fajr" from "fajr-adjustment"
+  const value = parseInt(input.value || '0', 10) || 0;
+  
+  // Update the setting in memory
+  if (prayerSettings.adjustments.hasOwnProperty(prayerName)) {
+    // TypeScript safe way to update dynamic property
+    (prayerSettings.adjustments as any)[prayerName] = value;
+    
+    // Preview the change
+    try {
+      initializeAppWithSettings();
+      previewPrayerTimes();
+    } catch (error) {
+      console.error(`Error previewing ${prayerName} adjustment change:`, error);
+    }
+  }
+}
+
+// Also handle custom angle inputs
+function setupCustomAngleInputs() {
+  const fajrAngleInput = document.getElementById('fajr-angle') as HTMLInputElement;
+  const ishaAngleInput = document.getElementById('isha-angle') as HTMLInputElement;
+  
+  if (fajrAngleInput) {
+    fajrAngleInput.addEventListener('input', handleAngleChange);
+  }
+  
+  if (ishaAngleInput) {
+    ishaAngleInput.addEventListener('input', handleAngleChange);
+  }
+}
+
+// Handle changes to angle inputs
+function handleAngleChange(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const angleName = input.id.split('-')[0]; // e.g., "fajr" from "fajr-angle"
+  const value = parseFloat(input.value || '18') || 18;
+  
+  // Update the setting in memory
+  if (prayerSettings.angles.hasOwnProperty(angleName)) {
+    // TypeScript safe way to update dynamic property
+    (prayerSettings.angles as any)[angleName] = value;
+    
+    // Preview the change
+    try {
+      initializeAppWithSettings();
+      previewPrayerTimes();
+    } catch (error) {
+      console.error(`Error previewing ${angleName} angle change:`, error);
+    }
+  }
+}
+
+// Show settings modal
+function showSettingsModal() {
+  console.log("Opening settings modal");
+  
+  // Store original settings for comparison when saving
+  originalPrayerSettings = JSON.parse(JSON.stringify(prayerSettings));
+  
+  // Generate settings modal dynamically to ensure it's fresh
+  generateSettingsModal();
+  
+  const modal = document.getElementById('settings-modal');
+  console.log("Modal element before opening:", modal);
+  
+  if (modal) {
+    // Display the modal
+    modal.style.display = 'flex';
+    
+    // Force a reflow before adding the active class to ensure the transition works
+    modal.offsetHeight;
+    
+    // Add active class to trigger transition
+    modal.classList.add('active');
+    
+    // Log the state after showing
+    console.log("Modal shown - classList:", modal.className);
+    console.log("Modal display:", modal.style.display);
+    
+    // After the modal is visible, attach all modal event listeners
+    attachModalEventListeners();
+  } else {
+    console.error("Settings modal element not found when trying to open");
+  }
+}
+
+// Attach all event listeners for the modal
+function attachModalEventListeners() {
+  // Close button
+  const closeButton = document.getElementById('close-settings-modal');
+  if (closeButton) {
+    console.log("Setting up close button listener");
+    // Remove any previous listeners to avoid duplicates
+    closeButton.removeEventListener('click', closeSettingsModal);
+    // Add the listener
+    closeButton.addEventListener('click', () => {
+      console.log("Close button clicked");
+      showToast("No changes made to settings");
+      closeSettingsModal();
+    });
+  } else {
+    console.error("Close button not found");
+  }
+  
+  // Save button
+  const saveButton = document.getElementById('save-settings-btn');
+  if (saveButton) {
+    console.log("Setting up save button listener");
+    // Remove any previous listeners to avoid duplicates
+    saveButton.removeEventListener('click', updatePrayerSettingsFromUI);
+    // Add the listener
+    saveButton.addEventListener('click', () => {
+      console.log("Save button clicked");
+      updatePrayerSettingsFromUI();
+    });
+  } else {
+    console.error("Save button not found");
+  }
+  
+  // Reset button
+  const resetButton = document.getElementById('reset-settings-btn');
+  if (resetButton) {
+    console.log("Setting up reset button listener");
+    // Remove any previous listeners to avoid duplicates
+    resetButton.removeEventListener('click', resetPrayerSettings);
+    // Add the listener
+    resetButton.addEventListener('click', () => {
+      console.log("Reset button clicked");
+      resetPrayerSettings();
+    });
+  } else {
+    console.error("Reset button not found");
+  }
+}
+
+// Close settings modal
+function closeSettingsModal() {
+  console.log("Closing settings modal");
+  const modal = document.getElementById('settings-modal');
+  
+  if (modal) {
+    // Remove active class to trigger transition
+    modal.classList.remove('active');
+    
+    // After transition is complete, hide the modal completely
+    setTimeout(() => {
+      modal.style.display = 'none';
+      console.log("Modal hidden");
+    }, 300); // 300ms to match transition time
+  } else {
+    console.error("Settings modal element not found when trying to close");
+  }
+}
+
+// Setup Hijri date adjustment input
+function setupHijriDateAdjustment() {
+  const hijriDateInput = document.getElementById('hijri-date-adjustment') as HTMLInputElement;
+  
+  if (hijriDateInput) {
+    hijriDateInput.addEventListener('input', handleHijriDateAdjustmentChange);
+  }
+}
+
+// Handle changes to Hijri date adjustment
+function handleHijriDateAdjustmentChange(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const value = parseInt(input.value || '0', 10) || 0;
+  
+  // Preview the change by showing the adjusted date
+  const previewElement = document.createElement('div');
+  previewElement.className = 'setting-preview';
+  
+  // Store the current value temporarily for preview
+  const originalValue = prayerSettings.hijriDateAdjustment;
+  prayerSettings.hijriDateAdjustment = value;
+  
+  // Calculate the new date with adjustment
+  const newHijriDate = getHijriDate();
+  
+  // Create or update preview element
+  let previewEl = input.parentElement?.querySelector('.setting-preview');
+  if (!previewEl) {
+    previewEl = document.createElement('div');
+    previewEl.className = 'setting-preview';
+    input.parentElement?.appendChild(previewEl);
+  }
+  
+  if (previewEl) {
+    previewEl.textContent = `Preview: ${newHijriDate}`;
+  }
+  
+  // Reset to original value until saved
+  prayerSettings.hijriDateAdjustment = originalValue;
+  
+  // Highlight save button to indicate changes
+  const saveButton = document.getElementById('save-settings-btn');
+  if (saveButton) {
+    saveButton.textContent = "Save Changes";
+    saveButton.classList.add('settings-btn-save-highlight');
+  }
+}
