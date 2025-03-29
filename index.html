@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+	<title>Prayer Times - Memphis, TN</title>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+	<meta name="description" content="Prayer times for Memphis, TN using the Moonsighting Committee calculation method" />
+	<link rel="stylesheet" href="src/styles.css" />
+	<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🕌</text></svg>" />
+	<link rel="preconnect" href="https://fonts.googleapis.com">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="manifest" href="/manifest.json">
+	<meta name="theme-color" content="#0a6e57">
+	<meta name="apple-mobile-web-app-capable" content="yes">
+	<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+	
+	<!-- Preload audio files -->
+	<audio id="athan1" preload="auto" style="display: none;">
+		<source src="sounds/a1.mp3" type="audio/mpeg">
+	</audio>
+	<audio id="athan2" preload="auto" style="display: none;">
+		<source src="sounds/a2.mp3" type="audio/mpeg">
+	</audio>
+</head>
+
+<body>
+	<div id="app"></div>
+
+	<!-- Load moment.js and moment-hijri directly -->
+	<script src="https://cdnjs.cloudflare.com/ajax/libs/moment.js/2.29.4/moment.min.js"></script>
+	<script src="https://cdn.jsdelivr.net/npm/moment-hijri@3.0.0/moment-hijri.min.js"></script>
+	<script>
+		// Verify moment-hijri is loaded and working
+		if (window.moment) {
+			console.log("Direct moment.js version:", moment.version);
+			console.log("Hijri date test:", moment().format('iYYYY/iM/iD'));
+		}
+	</script>
+
+	<script src="src/index.ts">
+	</script>
+</body>
+
+</html>
